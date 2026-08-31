@@ -1,0 +1,167 @@
+.app {
+  padding: 24px;
+  text-align: left;
+}
+
+header {
+  margin-bottom: 24px;
+}
+
+.subtitle {
+  color: var(--text);
+  margin-top: 4px;
+}
+
+.summary-panel {
+  display: flex;
+  gap: 32px;
+  padding: 16px 20px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 24px;
+  background: var(--code-bg);
+}
+
+.summary-panel > div {
+  display: flex;
+  flex-direction: column;
+}
+
+.summary-value {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-h);
+}
+
+.summary-label {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 280px 1fr;
+  gap: 32px;
+  align-items: start;
+}
+
+@media (max-width: 700px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+.entry-form {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.field label {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.field input {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text-h);
+}
+
+.field input:focus {
+  outline: 2px solid var(--accent-border);
+  outline-offset: 1px;
+}
+
+.form-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.form-actions button {
+  font: inherit;
+  padding: 8px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+.form-actions button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.form-actions button.secondary {
+  background: transparent;
+  color: var(--text-h);
+  border-color: var(--border);
+}
+
+.form-error {
+  color: #d92d20;
+  font-size: 14px;
+}
+
+.list-section h2 {
+  margin-bottom: 12px;
+}
+
+.entry-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.entry-table th,
+.entry-table td {
+  text-align: left;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 15px;
+}
+
+.entry-table th {
+  color: var(--text);
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.muted {
+  color: var(--text);
+}
+
+.row-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+button.link {
+  font: inherit;
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+button.link.danger {
+  color: #d92d20;
+}
+
+.empty-state {
+  color: var(--text);
+  padding: 16px 0;
+}
