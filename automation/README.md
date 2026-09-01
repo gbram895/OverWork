@@ -64,6 +64,16 @@ Same as above, but trigger on **Leave** your work location, and set
 - An **Overtime** tab that only gets a new row when a leave is later (or an
   arrive is earlier) than your standard workday — with date, arrive/leave
   times, total hours worked, and the overtime portion.
+- A live dashboard: open the **web app URL** from step 2 in any browser (or
+  add it to your iPhone home screen for an app-like icon) to see a
+  read-only summary — total overtime, this month's total, and the full
+  history — rendered straight from the current sheet on every load.
+
+If you already deployed before this dashboard existed, you'll need to push
+the updated script: **Deploy > Manage deployments**, pick the pencil icon on
+your existing deployment, set **Version: New version**, and **Deploy** again
+(the URL stays the same). Editing the code alone doesn't update a live
+deployment — it has to be redeployed.
 
 This runs independently of the [OverWork Ledger artifact](../README.md) (which
 is a manual, browser-only log) — think of the Sheet as the automatic record
