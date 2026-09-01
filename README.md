@@ -46,3 +46,9 @@ npm run build
 ```
 
 Then run the server with `npm run start -w server` (serves the API on port 3001; serve the built client from `client/dist` with any static file host).
+
+## Automatic logging
+
+Want overtime logged without touching a form? See [`automation/`](./automation) for
+an iPhone Shortcuts + Google Sheets setup that logs it automatically when you
+arrive at or leave work.
