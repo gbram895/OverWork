@@ -18,6 +18,20 @@ const SHEET_PUNCHES = 'Punches';
 const SHEET_OVERTIME = 'Overtime';
 const SHEET_CONFIG = 'Config';
 
+// Keyed by JS Date#getDay() (0 = Sunday … 6 = Saturday). A day with no entry
+// has no standard hours, so any time logged that day counts fully as
+// overtime — edit this (or the SCHEDULE_JSON script property, once set) to
+// change your actual work hours.
+const DEFAULT_SCHEDULE = {
+  '1': '08:00-16:30', // Monday
+  '2': '08:00-16:30', // Tuesday
+  '3': '08:00-16:30', // Wednesday
+  '4': '08:00-16:30', // Thursday
+  '5': '08:00-15:00', // Friday
+};
+
+const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('OverWork')
@@ -33,18 +47,22 @@ function setup() {
     token = Utilities.getUuid();
     props.setProperty('TOKEN', token);
   }
-  if (!props.getProperty('STANDARD_START')) props.setProperty('STANDARD_START', '09:00');
-  if (!props.getProperty('STANDARD_END')) props.setProperty('STANDARD_END', '17:00');
+  if (!props.getProperty('SCHEDULE_JSON')) {
+    props.setProperty('SCHEDULE_JSON', JSON.stringify(DEFAULT_SCHEDULE));
+  }
+  props.deleteProperty('STANDARD_START'); // superseded by SCHEDULE_JSON
+  props.deleteProperty('STANDARD_END');
 
   getOrCreateSheet(SHEET_PUNCHES, ['Timestamp', 'Event', 'Matched']);
   getOrCreateSheet(SHEET_OVERTIME, ['Date', 'Arrive', 'Leave', 'Hours Worked', 'Overtime Hours', 'Notes']);
 
   const config = getOrCreateSheet(SHEET_CONFIG, ['Key', 'Value']);
-  config.getRange('A2:B4').setValues([
-    ['Webhook Token', token],
-    ['Standard Start', props.getProperty('STANDARD_START')],
-    ['Standard End', props.getProperty('STANDARD_END')],
-  ]);
+  const schedule = getSchedule();
+  const scheduleRows = [];
+  for (let day = 0; day <= 6; day++) {
+    scheduleRows.push([WEEKDAY_NAMES[day], schedule[String(day)] || 'Not a workday — any hours logged count fully as overtime']);
+  }
+  config.getRange(2, 1, 1 + scheduleRows.length, 2).setValues([['Webhook Token', token]].concat(scheduleRows));
 
   try {
     SpreadsheetApp.getUi().alert(
@@ -192,12 +210,15 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+function getSchedule() {
+  const raw = PropertiesService.getScriptProperties().getProperty('SCHEDULE_JSON');
+  return raw ? JSON.parse(raw) : DEFAULT_SCHEDULE;
+}
+
 function doPost(e) {
   try {
     const props = PropertiesService.getScriptProperties();
     const token = props.getProperty('TOKEN');
-    const standardStart = props.getProperty('STANDARD_START') || '09:00';
-    const standardEnd = props.getProperty('STANDARD_END') || '17:00';
 
     if (!e.postData || !e.postData.contents) {
       return jsonResponse({ ok: false, error: 'Missing request body' });
@@ -223,7 +244,7 @@ function doPost(e) {
 
     let overtimeHours = 0;
     if (event === 'leave') {
-      overtimeHours = matchAndLogOvertime(punchesSheet, timestamp, standardStart, standardEnd);
+      overtimeHours = matchAndLogOvertime(punchesSheet, timestamp);
     }
 
     return jsonResponse({ ok: true, event: event, overtimeHours: overtimeHours });
@@ -232,7 +253,7 @@ function doPost(e) {
   }
 }
 
-function matchAndLogOvertime(punchesSheet, leaveTime, standardStart, standardEnd) {
+function matchAndLogOvertime(punchesSheet, leaveTime) {
   const data = punchesSheet.getDataRange().getValues();
   const leaveDay = dateKey(leaveTime);
 
@@ -243,7 +264,7 @@ function matchAndLogOvertime(punchesSheet, leaveTime, standardStart, standardEnd
     if (event === 'arrive' && !matched && dateKey(arriveTime) === leaveDay) {
       punchesSheet.getRange(row + 1, 3).setValue(true);
 
-      const overtimeHours = computeOvertimeHours(arriveTime, leaveTime, standardStart, standardEnd);
+      const overtimeHours = computeOvertimeHours(arriveTime, leaveTime);
       if (overtimeHours > 0) {
         const hoursWorked = (leaveTime.getTime() - arriveTime.getTime()) / 3600000;
         const overtimeSheet = getOrCreateSheet(SHEET_OVERTIME, [
@@ -275,13 +296,24 @@ function matchAndLogOvertime(punchesSheet, leaveTime, standardStart, standardEnd
 // plus 46 minutes late (66 total) counts as 1 hour, not 1h06.
 const OVERTIME_INCREMENT_MINUTES = 15;
 
-function computeOvertimeHours(arriveTime, leaveTime, standardStart, standardEnd) {
+function computeOvertimeHours(arriveTime, leaveTime) {
   const day = new Date(arriveTime.getFullYear(), arriveTime.getMonth(), arriveTime.getDate());
-  const stdStart = withTime(day, standardStart);
-  const stdEnd = withTime(day, standardEnd);
+  const window = getSchedule()[String(arriveTime.getDay())];
 
-  const earlyMs = Math.max(0, Math.min(stdStart.getTime(), leaveTime.getTime()) - arriveTime.getTime());
-  const lateMs = Math.max(0, leaveTime.getTime() - Math.max(stdEnd.getTime(), arriveTime.getTime()));
+  let earlyMs;
+  let lateMs;
+  if (window) {
+    const [startStr, endStr] = window.split('-');
+    const stdStart = withTime(day, startStr);
+    const stdEnd = withTime(day, endStr);
+    earlyMs = Math.max(0, Math.min(stdStart.getTime(), leaveTime.getTime()) - arriveTime.getTime());
+    lateMs = Math.max(0, leaveTime.getTime() - Math.max(stdEnd.getTime(), arriveTime.getTime()));
+  } else {
+    // No standard hours for this day (e.g. a weekend) — everything worked counts.
+    earlyMs = 0;
+    lateMs = Math.max(0, leaveTime.getTime() - arriveTime.getTime());
+  }
+
   const totalMinutes = (earlyMs + lateMs) / 60000;
   const roundedMinutes = Math.floor(totalMinutes / OVERTIME_INCREMENT_MINUTES) * OVERTIME_INCREMENT_MINUTES;
   return round2(roundedMinutes / 60);

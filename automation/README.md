@@ -20,10 +20,14 @@ Google Drive and the automation lives in the Shortcuts app on your phone.
    the script (it only touches this one spreadsheet) — approve it, then run
    **Run setup** again if the alert didn't show.
 5. Open the new **Config** tab in the sheet and copy the **Webhook Token**
-   value — you'll paste it into Shortcuts below. The default standard workday
-   is 09:00–17:00; edit `STANDARD_START` / `STANDARD_END` under
-   **Project Settings > Script Properties** in the Apps Script editor if
-   yours is different, then re-run setup.
+   value — you'll paste it into Shortcuts below. The Config tab also shows
+   your standard hours for each day of the week (default: Monday–Thursday
+   08:00–16:30, Friday 08:00–15:00, weekends not a workday). To change these,
+   edit the `SCHEDULE_JSON` script property under **Project Settings > Script
+   Properties** in the Apps Script editor — it's a JSON object keyed `"0"`
+   (Sunday) through `"6"` (Saturday), each value `"HH:MM-HH:MM"`; omit a day
+   entirely to make any time logged that day count fully as overtime. Re-run
+   setup afterward so the Config tab reflects the change.
 
 ## 2. Deploy it as a web app
 
@@ -92,5 +96,6 @@ misses (e.g. working late from home).
   the Config tab — re-copy it.
 - **Overtime tab stays empty but Punches has both an arrive and a leave**:
   the leave has to arrive *after* the matching arrive on the same calendar
-  day, and only the portion outside your standard start/end window counts
-  as overtime — a normal 9–5 day correctly logs 0.
+  day, and only the portion outside that day's standard window counts as
+  overtime — a normal, on-schedule day correctly logs 0. Also check the
+  Config tab shows the schedule you expect for that day of the week.
