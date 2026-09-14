@@ -73,15 +73,55 @@ Same as above, but trigger on **Leave** your work location, and set
   minutes early counts as 0, but 20 minutes early plus 46 minutes late (66
   total) counts as 1 hour, not 1h06.
 - A live dashboard: open the **web app URL** from step 2 in any browser (or
-  add it to your iPhone home screen for an app-like icon) to see a
-  read-only summary — total overtime, this month's total, and the full
-  history — rendered straight from the current sheet on every load.
+  add it to your iPhone home screen for an app-like icon) to see three
+  balances — **vacation days**, **ADV hours**, and **overtime hours** — plus
+  overtime history and the Belgian holidays still coming up this year.
+- A daily check (7pm) that emails you if a day that should've been a workday
+  passes with no arrival logged, so you can say what actually happened.
 
-If you already deployed before this dashboard existed, you'll need to push
+If you already deployed before these features existed, you'll need to push
 the updated script: **Deploy > Manage deployments**, pick the pencil icon on
 your existing deployment, set **Version: New version**, and **Deploy** again
 (the URL stays the same). Editing the code alone doesn't update a live
-deployment — it has to be redeployed.
+deployment — it has to be redeployed. Re-running **OverWork > Run setup**
+afterward will also ask you to re-authorize, this time for permission to
+send email (that's the daily check) — approve it.
+
+## Vacation, ADV, and overtime balances
+
+- **Vacation**: 20 days/year by default, plus one extra day for every
+  Belgian public holiday that falls on a weekend that year (e.g. 2026 has
+  two — Aug 15 and Nov 1 — so the 2026 total is 22).
+- **ADV**: 24 hours/year by default ("Aanvullende Vrije Dagen" / ADV
+  compensation hours).
+- **Overtime**: whatever's been auto-logged to the Overtime tab, minus
+  whatever you've used.
+
+Change the yearly amounts via the `VACATION_DAYS_PER_YEAR` / `ADV_HOURS_PER_YEAR`
+script properties (**Project Settings > Script Properties**), then re-run setup.
+
+Belgium's 10 national holidays (Nieuwjaar, Paasmaandag, Dag van de Arbeid,
+O.L.H. Hemelvaart, Pinkstermaandag, Nationale feestdag, O.L.V. Hemelvaart,
+Allerheiligen, Wapenstilstand, Kerstmis) are calculated automatically each
+year — including the Easter-based ones — so you're never expected to work on
+them, and the daily check skips them too.
+
+## The daily "were you at work" check
+
+Every evening at 7pm, the script checks whether today was a scheduled
+workday (per your weekday hours) that wasn't a Belgian holiday, and whether
+any arrival was actually logged. If not, it emails you a choice of four
+links:
+
+- **I worked** (you forgot to trigger Shortcuts — no balance is touched)
+- **Use a vacation day** (−1 vacation day)
+- **Use ADV hours** (−that day's scheduled hours from your ADV balance)
+- **Use overtime** (−that day's scheduled hours from your overtime balance)
+
+Each link opens a confirmation page first — nothing is recorded until you
+tap **Confirm** there, so the email client merely opening a link preview
+won't accidentally log anything. Every day only gets asked about once; once
+resolved it's added to the **Absences** tab and won't be asked again.
 
 This runs independently of the [OverWork Ledger artifact](../README.md) (which
 is a manual, browser-only log) — think of the Sheet as the automatic record
@@ -99,3 +139,12 @@ misses (e.g. working late from home).
   day, and only the portion outside that day's standard window counts as
   overtime — a normal, on-schedule day correctly logs 0. Also check the
   Config tab shows the schedule you expect for that day of the week.
+- **No daily email arrives**: open the Apps Script editor's **Triggers**
+  panel (clock icon, left sidebar) and confirm a `checkForMissingDay` trigger
+  exists — if not, re-run **OverWork > Run setup**, which installs it. Also
+  check the **Executions** panel for errors (a missing "send email" scope
+  authorization is the most common cause — re-run setup and approve it).
+- **Balances look wrong**: they're scoped to the calendar year in the URL
+  (`?year=2026`, defaulting to the current year) — double check you're not
+  comparing across years, and that the Absences tab has the entries you
+  expect.

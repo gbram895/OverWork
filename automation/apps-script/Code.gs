@@ -6,6 +6,11 @@
  * is matched to the same day's "arrive" ping, the hours worked outside the
  * standard workday window are computed and appended to an "Overtime" sheet.
  *
+ * Also tracks Belgian public holidays, vacation days, ADV hours, and
+ * overtime as spendable balances, and emails you once a day if a scheduled
+ * workday passes with no punch logged, so you can say whether you worked,
+ * took a vacation day, used ADV hours, or used overtime.
+ *
  * Setup:
  *   1. Create a Google Sheet, open Extensions > Apps Script, paste this file in.
  *   2. Reload the sheet, use the "OverWork" menu > "Run setup".
@@ -16,6 +21,7 @@
 
 const SHEET_PUNCHES = 'Punches';
 const SHEET_OVERTIME = 'Overtime';
+const SHEET_ABSENCES = 'Absences';
 const SHEET_CONFIG = 'Config';
 
 // Keyed by JS Date#getDay() (0 = Sunday … 6 = Saturday). A day with no entry
@@ -30,7 +36,11 @@ const DEFAULT_SCHEDULE = {
   '5': '08:00-15:00', // Friday
 };
 
+const DEFAULT_VACATION_DAYS_PER_YEAR = 20;
+const DEFAULT_ADV_HOURS_PER_YEAR = 24;
+
 const WEEKDAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const ABSENCE_TYPES = { worked: 'Worked', vacation: 'Vacation', adv: 'ADV', overtime: 'Overtime' };
 
 function onOpen() {
   SpreadsheetApp.getUi()
@@ -50,39 +60,330 @@ function setup() {
   if (!props.getProperty('SCHEDULE_JSON')) {
     props.setProperty('SCHEDULE_JSON', JSON.stringify(DEFAULT_SCHEDULE));
   }
+  if (!props.getProperty('VACATION_DAYS_PER_YEAR')) {
+    props.setProperty('VACATION_DAYS_PER_YEAR', String(DEFAULT_VACATION_DAYS_PER_YEAR));
+  }
+  if (!props.getProperty('ADV_HOURS_PER_YEAR')) {
+    props.setProperty('ADV_HOURS_PER_YEAR', String(DEFAULT_ADV_HOURS_PER_YEAR));
+  }
   props.deleteProperty('STANDARD_START'); // superseded by SCHEDULE_JSON
   props.deleteProperty('STANDARD_END');
 
   getOrCreateSheet(SHEET_PUNCHES, ['Timestamp', 'Event', 'Matched']);
   getOrCreateSheet(SHEET_OVERTIME, ['Date', 'Arrive', 'Leave', 'Hours Worked', 'Overtime Hours', 'Notes']);
+  getOrCreateSheet(SHEET_ABSENCES, ['Date', 'Type', 'Hours', 'Notes']);
+
+  ensureDailyTrigger();
 
   const config = getOrCreateSheet(SHEET_CONFIG, ['Key', 'Value']);
   const schedule = getSchedule();
-  const scheduleRows = [];
+  const rows = [['Webhook Token', token]];
   for (let day = 0; day <= 6; day++) {
-    scheduleRows.push([WEEKDAY_NAMES[day], schedule[String(day)] || 'Not a workday — any hours logged count fully as overtime']);
+    rows.push([WEEKDAY_NAMES[day], schedule[String(day)] || 'Not a workday — any hours logged count fully as overtime']);
   }
-  config.getRange(2, 1, 1 + scheduleRows.length, 2).setValues([['Webhook Token', token]].concat(scheduleRows));
+  rows.push(['Vacation Days / Year', props.getProperty('VACATION_DAYS_PER_YEAR')]);
+  rows.push(['ADV Hours / Year', props.getProperty('ADV_HOURS_PER_YEAR')]);
+  config.getRange(2, 1, rows.length, 2).setValues(rows);
 
   try {
     SpreadsheetApp.getUi().alert(
       'Setup complete. Copy the webhook token from the Config tab, then deploy this ' +
-        'script as a web app (Deploy > New deployment > Web app) and use that URL in Shortcuts.'
+        'script as a web app (Deploy > New deployment > Web app) and use that URL in Shortcuts. ' +
+        'A daily check now emails you if a workday passes with no punch logged.'
     );
   } catch (e) {
     // getUi() is unavailable when setup() is run from the script editor directly
-    // rather than the sheet's menu — that's fine, the Config tab still has the token.
+    // rather than the sheet's menu — that's fine, the Config tab still has everything.
   }
 }
+
+function ensureDailyTrigger() {
+  const exists = ScriptApp.getProjectTriggers().some(function (t) {
+    return t.getHandlerFunction() === 'checkForMissingDay';
+  });
+  if (!exists) {
+    ScriptApp.newTrigger('checkForMissingDay').timeBased().everyDays(1).atHour(19).create();
+  }
+}
+
+function getSchedule() {
+  const raw = PropertiesService.getScriptProperties().getProperty('SCHEDULE_JSON');
+  return raw ? JSON.parse(raw) : DEFAULT_SCHEDULE;
+}
+
+function scheduledHoursForDay(dateStr) {
+  const window = getSchedule()[String(new Date(dateStr + 'T12:00:00').getDay())];
+  if (!window) return 0;
+  const [startStr, endStr] = window.split('-');
+  const [sh, sm] = startStr.split(':').map(Number);
+  const [eh, em] = endStr.split(':').map(Number);
+  return round2(((eh * 60 + em) - (sh * 60 + sm)) / 60);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Belgian public holidays                                                */
+/* ---------------------------------------------------------------------- */
+
+// Anonymous Gregorian algorithm (Meeus/Jones/Butcher) for Easter Sunday.
+function getEasterSunday(year) {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+function addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+// Belgium's 10 national holidays for a given year, each flagged if it falls
+// on a weekend (per the user's own rule, those convert into an extra
+// vacation day since there's no workday to take off).
+function getBelgianHolidays(year) {
+  const easter = getEasterSunday(year);
+  const tz = Session.getScriptTimeZone();
+  const raw = [
+    { date: new Date(year, 0, 1), name: 'Nieuwjaar' },
+    { date: addDays(easter, 1), name: 'Paasmaandag' },
+    { date: new Date(year, 4, 1), name: 'Dag van de Arbeid' },
+    { date: addDays(easter, 39), name: 'O.L.H. Hemelvaart' },
+    { date: addDays(easter, 50), name: 'Pinkstermaandag' },
+    { date: new Date(year, 6, 21), name: 'Nationale feestdag' },
+    { date: new Date(year, 7, 15), name: 'O.L.V. Hemelvaart' },
+    { date: new Date(year, 10, 1), name: 'Allerheiligen' },
+    { date: new Date(year, 10, 11), name: 'Wapenstilstand' },
+    { date: new Date(year, 11, 25), name: 'Kerstmis' },
+  ];
+  return raw.map(function (h) {
+    const dow = h.date.getDay();
+    return {
+      date: Utilities.formatDate(h.date, tz, 'yyyy-MM-dd'),
+      name: h.name,
+      isWeekend: dow === 0 || dow === 6,
+    };
+  });
+}
+
+function isBelgianHoliday(dateStr) {
+  const year = Number(dateStr.slice(0, 4));
+  return getBelgianHolidays(year).some(function (h) {
+    return h.date === dateStr;
+  });
+}
+
+/* ---------------------------------------------------------------------- */
+/* Daily "were you at work" check                                         */
+/* ---------------------------------------------------------------------- */
+
+function checkForMissingDay() {
+  const dateStr = dateKey(new Date());
+  const dow = new Date(dateStr + 'T12:00:00').getDay();
+
+  if (!getSchedule()[String(dow)]) return; // not a scheduled workday
+  if (isBelgianHoliday(dateStr)) return; // public holiday, nothing to ask
+
+  const punchesSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_PUNCHES);
+  if (punchesSheet && punchesSheet.getLastRow() > 1) {
+    const data = punchesSheet.getRange(2, 1, punchesSheet.getLastRow() - 1, 2).getValues();
+    for (let i = 0; i < data.length; i++) {
+      if (data[i][1] === 'arrive' && dateKey(new Date(data[i][0])) === dateStr) return; // they were at work
+    }
+  }
+
+  const absencesSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_ABSENCES);
+  if (absencesSheet && absencesSheet.getLastRow() > 1) {
+    const data = absencesSheet.getRange(2, 1, absencesSheet.getLastRow() - 1, 1).getValues();
+    for (let i = 0; i < data.length; i++) {
+      if (String(data[i][0]) === dateStr) return; // already resolved
+    }
+  }
+
+  sendMissingDayEmail(dateStr);
+}
+
+function sendMissingDayEmail(dateStr) {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty('TOKEN');
+  const url = ScriptApp.getService().getUrl();
+  const base = url + '?token=' + encodeURIComponent(token) + '&confirm=' + encodeURIComponent(dateStr) + '&type=';
+
+  const html =
+    '<p>No arrival was logged for <b>' + dateStr + '</b>. What happened?</p>' +
+    '<p>' +
+    '<a href="' + base + 'worked">I worked (forgot to trigger Shortcuts)</a><br>' +
+    '<a href="' + base + 'vacation">Use a vacation day</a><br>' +
+    '<a href="' + base + 'adv">Use ADV hours</a><br>' +
+    '<a href="' + base + 'overtime">Use overtime</a>' +
+    '</p>' +
+    '<p style="color:#888;font-size:12px">Each link opens a confirmation page before anything is recorded.</p>';
+
+  MailApp.sendEmail({
+    to: Session.getActiveUser().getEmail(),
+    subject: 'OverWork: no punch logged for ' + dateStr,
+    htmlBody: html,
+  });
+}
+
+/* ---------------------------------------------------------------------- */
+/* Web app                                                                */
+/* ---------------------------------------------------------------------- */
 
 function doGet(e) {
-  if (e && e.parameter && e.parameter.format === 'json') {
-    return jsonResponse({ ok: true, message: 'OverWork webhook is running.' });
-  }
-  return renderDashboard();
+  const params = (e && e.parameter) || {};
+
+  if (params.resolve) return handleResolve(params);
+  if (params.confirm) return handleConfirm(params);
+  if (params.format === 'json') return jsonResponse({ ok: true, message: 'OverWork webhook is running.' });
+
+  return renderDashboard(params.year);
 }
 
-function renderDashboard() {
+function checkToken(params) {
+  const token = PropertiesService.getScriptProperties().getProperty('TOKEN');
+  return !!token && params.token === token;
+}
+
+// Shows a one-click confirmation page before anything is written, so an
+// email client's link-preview/safe-link scanner opening the link doesn't by
+// itself record anything.
+function handleConfirm(params) {
+  if (!checkToken(params)) return HtmlService.createHtmlOutput(simpleMessage('Invalid or missing token.', true));
+
+  const date = params.confirm;
+  const type = String(params.type || '').toLowerCase();
+  if (!ABSENCE_TYPES[type]) return HtmlService.createHtmlOutput(simpleMessage('Unknown type.', true));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return HtmlService.createHtmlOutput(simpleMessage('Invalid date.', true));
+
+  const resolveUrl =
+    ScriptApp.getService().getUrl() +
+    '?token=' + encodeURIComponent(params.token) +
+    '&resolve=' + encodeURIComponent(date) +
+    '&type=' + encodeURIComponent(type);
+
+  const label = ABSENCE_TYPES[type];
+  return HtmlService.createHtmlOutput(
+    simpleMessage(
+      'Mark <b>' + esc(date) + '</b> as <b>' + esc(label) + '</b>?<br><br>' +
+        '<a href="' + resolveUrl + '" style="display:inline-block;padding:10px 18px;background:#A9662A;color:#fff;' +
+        'border-radius:6px;text-decoration:none;font-weight:600">Confirm</a>',
+      false
+    )
+  );
+}
+
+function handleResolve(params) {
+  if (!checkToken(params)) return HtmlService.createHtmlOutput(simpleMessage('Invalid or missing token.', true));
+
+  const date = params.resolve;
+  const type = String(params.type || '').toLowerCase();
+  if (!ABSENCE_TYPES[type]) return HtmlService.createHtmlOutput(simpleMessage('Unknown type.', true));
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return HtmlService.createHtmlOutput(simpleMessage('Invalid date.', true));
+
+  const absencesSheet = getOrCreateSheet(SHEET_ABSENCES, ['Date', 'Type', 'Hours', 'Notes']);
+  const existing = absencesSheet.getLastRow() > 1 ? absencesSheet.getRange(2, 1, absencesSheet.getLastRow() - 1, 2).getValues() : [];
+  for (let i = 0; i < existing.length; i++) {
+    if (String(existing[i][0]) === date) {
+      return HtmlService.createHtmlOutput(simpleMessage('That day was already resolved as "' + esc(String(existing[i][1])) + '".', false));
+    }
+  }
+
+  const label = ABSENCE_TYPES[type];
+  const hours = type === 'adv' || type === 'overtime' ? scheduledHoursForDay(date) : 0;
+  absencesSheet.appendRow([date, label, hours, 'Resolved via email link']);
+
+  return HtmlService.createHtmlOutput(
+    simpleMessage('Marked ' + esc(date) + ' as ' + esc(label) + (hours ? ' (' + hours + 'h)' : '') + '. You can close this tab.', false)
+  );
+}
+
+function simpleMessage(text, isError) {
+  return (
+    '<!DOCTYPE html><html><head><meta charset="utf-8">' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<style>body{font-family:system-ui,sans-serif;background:#E9ECE3;color:#1C2420;padding:40px 20px;' +
+    'text-align:center}.card{max-width:420px;margin:0 auto;background:#FBFBF8;border:1px solid #D2D7C7;' +
+    'border-radius:8px;padding:24px;' + (isError ? 'border-left:4px solid #A23D3D' : 'border-left:4px solid #A9662A') + '}</style>' +
+    '</head><body><div class="card">' + text + '</div></body></html>'
+  );
+}
+
+/* ---------------------------------------------------------------------- */
+/* Balances                                                                */
+/* ---------------------------------------------------------------------- */
+
+function computeBalances(year) {
+  const props = PropertiesService.getScriptProperties();
+  const vacationPerYear = Number(props.getProperty('VACATION_DAYS_PER_YEAR')) || DEFAULT_VACATION_DAYS_PER_YEAR;
+  const advPerYear = Number(props.getProperty('ADV_HOURS_PER_YEAR')) || DEFAULT_ADV_HOURS_PER_YEAR;
+
+  const holidays = getBelgianHolidays(year);
+  const weekendHolidayCount = holidays.filter(function (h) { return h.isWeekend; }).length;
+  const vacationTotal = vacationPerYear + weekendHolidayCount;
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const absencesSheet = ss.getSheetByName(SHEET_ABSENCES);
+  const absences = absencesSheet && absencesSheet.getLastRow() > 1
+    ? absencesSheet.getRange(2, 1, absencesSheet.getLastRow() - 1, 4).getValues()
+    : [];
+
+  let vacationUsed = 0;
+  let advUsed = 0;
+  let overtimeUsed = 0;
+  absences.forEach(function (row) {
+    if (String(row[0]).slice(0, 4) !== String(year)) return;
+    const type = row[1];
+    const hours = Number(row[2]) || 0;
+    if (type === 'Vacation') vacationUsed += 1;
+    if (type === 'ADV') advUsed += hours;
+    if (type === 'Overtime') overtimeUsed += hours;
+  });
+
+  const overtimeSheet = ss.getSheetByName(SHEET_OVERTIME);
+  const overtimeRows = overtimeSheet && overtimeSheet.getLastRow() > 1
+    ? overtimeSheet.getRange(2, 1, overtimeSheet.getLastRow() - 1, 6).getValues()
+    : [];
+  let overtimeEarned = 0;
+  overtimeRows.forEach(function (row) {
+    if (String(row[0]).slice(0, 4) !== String(year)) return;
+    overtimeEarned += Number(row[4]) || 0;
+  });
+
+  return {
+    year: year,
+    vacationTotal: vacationTotal,
+    vacationUsed: vacationUsed,
+    vacationRemaining: round2(vacationTotal - vacationUsed),
+    advTotal: advPerYear,
+    advUsed: round2(advUsed),
+    advRemaining: round2(advPerYear - advUsed),
+    overtimeEarned: round2(overtimeEarned),
+    overtimeUsed: round2(overtimeUsed),
+    overtimeRemaining: round2(overtimeEarned - overtimeUsed),
+    upcomingHolidays: holidays.filter(function (h) { return h.date >= dateKey(new Date()); }),
+  };
+}
+
+/* ---------------------------------------------------------------------- */
+/* Dashboard                                                               */
+/* ---------------------------------------------------------------------- */
+
+function renderDashboard(yearParam) {
+  const year = Number(yearParam) || new Date().getFullYear();
+  const balances = computeBalances(year);
+
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_OVERTIME);
   const rows = sheet && sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, 6).getValues() : [];
   const tz = Session.getScriptTimeZone();
@@ -114,23 +415,21 @@ function renderDashboard() {
     ? entries
         .map(function (row) {
           return (
-            '<tr><td class="mono">' +
-            esc(row.date) +
-            '</td><td class="mono">' +
-            esc(row.arrive) +
-            '–' +
-            esc(row.leave) +
-            '</td><td class="mono">' +
-            row.hoursWorked.toFixed(2) +
-            '</td><td class="mono ot">' +
-            row.overtimeHours.toFixed(2) +
-            '</td><td>' +
-            esc(row.notes) +
-            '</td></tr>'
+            '<tr><td class="mono">' + esc(row.date) + '</td><td class="mono">' + esc(row.arrive) + '–' + esc(row.leave) +
+            '</td><td class="mono">' + row.hoursWorked.toFixed(2) + '</td><td class="mono ot">' + row.overtimeHours.toFixed(2) +
+            '</td><td>' + esc(row.notes) + '</td></tr>'
           );
         })
         .join('')
     : '<tr><td colspan="5" class="empty">No overtime logged yet.</td></tr>';
+
+  const holidaysHtml = balances.upcomingHolidays.length
+    ? balances.upcomingHolidays
+        .map(function (h) {
+          return '<li><span class="mono">' + esc(h.date) + '</span> — ' + esc(h.name) + (h.isWeekend ? ' <span class="tag">weekend</span>' : '') + '</li>';
+        })
+        .join('')
+    : '<li class="empty">No holidays left this year.</li>';
 
   const html = `<!DOCTYPE html>
 <html>
@@ -155,15 +454,21 @@ function renderDashboard() {
   }
   * { box-sizing: border-box; }
   body { background: var(--bg); color: var(--ink); font-family: "IBM Plex Sans", system-ui, sans-serif; margin: 0; padding: 28px 16px 60px; }
-  .page { max-width: 720px; margin: 0 auto; }
+  .page { max-width: 760px; margin: 0 auto; }
   .brand { display: flex; align-items: baseline; gap: 10px; }
   h1 { font-family: "IBM Plex Serif", Georgia, serif; font-size: 24px; margin: 0; }
   .mark { font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); border: 1px solid var(--accent); border-radius: 3px; padding: 2px 6px; }
   .tagline { font-size: 13px; color: var(--ink-soft); margin: 4px 0 20px; }
+  .balances { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 22px; }
+  @media (max-width: 560px) { .balances { grid-template-columns: 1fr; } }
+  .balance-card { background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 6px; padding: 14px 16px; }
+  .balance-title { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-faint); margin-bottom: 6px; }
+  .balance-value { font-family: "IBM Plex Mono", monospace; font-size: 22px; font-weight: 600; }
+  .balance-sub { font-size: 11.5px; color: var(--ink-soft); font-family: "IBM Plex Mono", monospace; }
   .ledger-strip { display: flex; gap: 28px; flex-wrap: wrap; background: var(--surface); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 6px; padding: 16px 20px; margin-bottom: 22px; }
   .stat-value { display: block; font-family: "IBM Plex Mono", monospace; font-size: 24px; font-weight: 600; }
   .stat-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-faint); }
-  .ledger-body { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 18px; }
+  .ledger-body { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 18px; margin-bottom: 22px; }
   .ledger-body h2 { font-family: "IBM Plex Serif", Georgia, serif; font-size: 16px; margin: 0 0 12px; }
   .scroll { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
@@ -173,18 +478,42 @@ function renderDashboard() {
   .mono { font-family: "IBM Plex Mono", monospace; white-space: nowrap; }
   .ot { color: var(--accent); font-weight: 600; }
   .empty { text-align: center; color: var(--ink-faint); padding: 20px 0; }
+  ul.holidays { list-style: none; margin: 0; padding: 0; font-size: 13.5px; }
+  ul.holidays li { padding: 6px 0; border-top: 1px solid var(--line); }
+  ul.holidays li:first-child { border-top: none; }
+  .tag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); border: 1px solid var(--accent); border-radius: 3px; padding: 1px 5px; margin-left: 4px; }
   footer { text-align: center; font-size: 11.5px; color: var(--ink-faint); margin-top: 16px; }
 </style>
 </head>
 <body>
 <div class="page">
   <div class="brand"><h1>OverWork</h1><span class="mark">Live Ledger</span></div>
-  <p class="tagline">Auto-logged from your Shortcuts automations.</p>
+  <p class="tagline">Auto-logged from your Shortcuts automations. Balances for ${balances.year}.</p>
+
+  <div class="balances">
+    <div class="balance-card">
+      <div class="balance-title">Vacation days</div>
+      <div class="balance-value">${balances.vacationRemaining}</div>
+      <div class="balance-sub">${balances.vacationUsed} used / ${balances.vacationTotal} total</div>
+    </div>
+    <div class="balance-card">
+      <div class="balance-title">ADV hours</div>
+      <div class="balance-value">${balances.advRemaining}</div>
+      <div class="balance-sub">${balances.advUsed} used / ${balances.advTotal} total</div>
+    </div>
+    <div class="balance-card">
+      <div class="balance-title">Overtime hours</div>
+      <div class="balance-value">${balances.overtimeRemaining}</div>
+      <div class="balance-sub">${balances.overtimeUsed} used / ${balances.overtimeEarned} earned</div>
+    </div>
+  </div>
+
   <div class="ledger-strip">
     <div><span class="stat-value">${totalOvertime.toFixed(1)}</span><span class="stat-label">Total overtime hours</span></div>
     <div><span class="stat-value">${monthOvertime.toFixed(1)}</span><span class="stat-label">This month</span></div>
     <div><span class="stat-value">${entries.length}</span><span class="stat-label">Entries logged</span></div>
   </div>
+
   <section class="ledger-body">
     <h2>History</h2>
     <div class="scroll">
@@ -194,6 +523,12 @@ function renderDashboard() {
       </table>
     </div>
   </section>
+
+  <section class="ledger-body">
+    <h2>Remaining Belgian holidays this year</h2>
+    <ul class="holidays">${holidaysHtml}</ul>
+  </section>
+
   <footer>Reload any time — this always reads the live sheet.</footer>
 </div>
 </body>
@@ -210,10 +545,9 @@ function esc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function getSchedule() {
-  const raw = PropertiesService.getScriptProperties().getProperty('SCHEDULE_JSON');
-  return raw ? JSON.parse(raw) : DEFAULT_SCHEDULE;
-}
+/* ---------------------------------------------------------------------- */
+/* Webhook (Shortcuts)                                                     */
+/* ---------------------------------------------------------------------- */
 
 function doPost(e) {
   try {
