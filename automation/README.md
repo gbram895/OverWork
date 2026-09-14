@@ -63,7 +63,11 @@ Same as above, but trigger on **Leave** your work location, and set
 - A **Punches** tab with a raw log of every arrive/leave ping.
 - An **Overtime** tab that only gets a new row when a leave is later (or an
   arrive is earlier) than your standard workday — with date, arrive/leave
-  times, total hours worked, and the overtime portion.
+  times, total hours worked, and the overtime portion. The early+late total
+  has to reach a full 15 minutes to count at all, and only counts in whole
+  15-minute blocks after that (rounded down, not to the nearest) — e.g. 13
+  minutes early counts as 0, but 20 minutes early plus 46 minutes late (66
+  total) counts as 1 hour, not 1h06.
 - A live dashboard: open the **web app URL** from step 2 in any browser (or
   add it to your iPhone home screen for an app-like icon) to see a
   read-only summary — total overtime, this month's total, and the full

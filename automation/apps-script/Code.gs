@@ -269,6 +269,12 @@ function matchAndLogOvertime(punchesSheet, leaveTime, standardStart, standardEnd
   return 0; // no matching arrive punch found for today
 }
 
+// Overtime only counts once the early/late total reaches a full 15-minute
+// block, and only in whole 15-minute blocks after that (rounded down, not
+// to the nearest) — e.g. 13 minutes early counts as 0, but 20 minutes early
+// plus 46 minutes late (66 total) counts as 1 hour, not 1h06.
+const OVERTIME_INCREMENT_MINUTES = 15;
+
 function computeOvertimeHours(arriveTime, leaveTime, standardStart, standardEnd) {
   const day = new Date(arriveTime.getFullYear(), arriveTime.getMonth(), arriveTime.getDate());
   const stdStart = withTime(day, standardStart);
@@ -276,7 +282,9 @@ function computeOvertimeHours(arriveTime, leaveTime, standardStart, standardEnd)
 
   const earlyMs = Math.max(0, Math.min(stdStart.getTime(), leaveTime.getTime()) - arriveTime.getTime());
   const lateMs = Math.max(0, leaveTime.getTime() - Math.max(stdEnd.getTime(), arriveTime.getTime()));
-  return round2((earlyMs + lateMs) / 3600000);
+  const totalMinutes = (earlyMs + lateMs) / 60000;
+  const roundedMinutes = Math.floor(totalMinutes / OVERTIME_INCREMENT_MINUTES) * OVERTIME_INCREMENT_MINUTES;
+  return round2(roundedMinutes / 60);
 }
 
 function withTime(day, hhmm) {
