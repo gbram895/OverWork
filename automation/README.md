@@ -97,8 +97,24 @@ send email (that's the daily check) — approve it.
 - **Overtime**: whatever's been auto-logged to the Overtime tab, minus
   whatever you've used.
 
-Change the yearly amounts via the `VACATION_DAYS_PER_YEAR` / `ADV_HOURS_PER_YEAR`
-script properties (**Project Settings > Script Properties**), then re-run setup.
+### Editing balances
+
+The dashboard is normally read-only, since the plain URL is reachable by
+anyone who has it (that's what lets Shortcuts talk to it). To edit anything,
+open the dashboard with your webhook token appended:
+`<your web app URL>?token=<your token>` — bookmark that separately from
+your everyday read-only link. It unlocks two forms:
+
+- **Vacation days / year and ADV hours / year** — changes the constant
+  going forward (this is the same as the `VACATION_DAYS_PER_YEAR` /
+  `ADV_HOURS_PER_YEAR` script properties, editable either place).
+- **Add adjustment** — a one-off correction to any balance's *remaining*
+  amount: pick Vacation/ADV/Overtime, enter a positive or negative number
+  (days for vacation, hours for ADV/overtime), a date, and an optional
+  note. Use a negative number to account for time used before this system
+  existed; a positive one for something like an employer manually granting
+  extra hours. These are logged to the **Adjustments** tab and, like
+  everything else, scoped to the calendar year of the date you give them.
 
 Belgium's 10 national holidays (Nieuwjaar, Paasmaandag, Dag van de Arbeid,
 O.L.H. Hemelvaart, Pinkstermaandag, Nationale feestdag, O.L.V. Hemelvaart,

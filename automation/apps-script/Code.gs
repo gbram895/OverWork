@@ -22,6 +22,7 @@
 const SHEET_PUNCHES = 'Punches';
 const SHEET_OVERTIME = 'Overtime';
 const SHEET_ABSENCES = 'Absences';
+const SHEET_ADJUSTMENTS = 'Adjustments';
 const SHEET_CONFIG = 'Config';
 
 // Keyed by JS Date#getDay() (0 = Sunday … 6 = Saturday). A day with no entry
@@ -72,6 +73,7 @@ function setup() {
   getOrCreateSheet(SHEET_PUNCHES, ['Timestamp', 'Event', 'Matched']);
   getOrCreateSheet(SHEET_OVERTIME, ['Date', 'Arrive', 'Leave', 'Hours Worked', 'Overtime Hours', 'Notes']);
   getOrCreateSheet(SHEET_ABSENCES, ['Date', 'Type', 'Hours', 'Notes']);
+  getOrCreateSheet(SHEET_ADJUSTMENTS, ['Date', 'Type', 'Amount', 'Notes']);
 
   ensureDailyTrigger();
 
@@ -246,9 +248,11 @@ function doGet(e) {
 
   if (params.resolve) return handleResolve(params);
   if (params.confirm) return handleConfirm(params);
+  if (params.action === 'updateSettings') return handleUpdateSettings(params);
+  if (params.action === 'addAdjustment') return handleAddAdjustment(params);
   if (params.format === 'json') return jsonResponse({ ok: true, message: 'OverWork webhook is running.' });
 
-  return renderDashboard(params.year);
+  return renderDashboard(params);
 }
 
 function checkToken(params) {
@@ -309,6 +313,63 @@ function handleResolve(params) {
   );
 }
 
+function handleUpdateSettings(params) {
+  if (!checkToken(params)) return HtmlService.createHtmlOutput(simpleMessage('Invalid or missing token.', true));
+
+  const vacationDays = Number(params.vacationDaysPerYear);
+  const advHours = Number(params.advHoursPerYear);
+  if (!Number.isFinite(vacationDays) || vacationDays < 0 || !Number.isFinite(advHours) || advHours < 0) {
+    return HtmlService.createHtmlOutput(simpleMessage('Vacation days and ADV hours must be numbers of 0 or more.', true));
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty('VACATION_DAYS_PER_YEAR', String(vacationDays));
+  props.setProperty('ADV_HOURS_PER_YEAR', String(advHours));
+
+  const backUrl = ScriptApp.getService().getUrl() + '?token=' + encodeURIComponent(params.token);
+  return HtmlService.createHtmlOutput(
+    simpleMessage(
+      'Updated: ' + vacationDays + ' vacation days/year, ' + advHours + ' ADV hours/year.<br><br>' + backLink(backUrl),
+      false
+    )
+  );
+}
+
+function handleAddAdjustment(params) {
+  if (!checkToken(params)) return HtmlService.createHtmlOutput(simpleMessage('Invalid or missing token.', true));
+
+  const type = String(params.type || '').toLowerCase();
+  const typeLabels = { vacation: 'Vacation', adv: 'ADV', overtime: 'Overtime' };
+  if (!typeLabels[type]) return HtmlService.createHtmlOutput(simpleMessage('Unknown balance type.', true));
+
+  const amount = Number(params.amount);
+  if (!Number.isFinite(amount) || amount === 0) {
+    return HtmlService.createHtmlOutput(simpleMessage('Amount must be a non-zero number (negative to subtract).', true));
+  }
+
+  const date = /^\d{4}-\d{2}-\d{2}$/.test(params.date || '') ? params.date : dateKey(new Date());
+  const notes = String(params.notes || 'Manual adjustment');
+
+  const adjustmentsSheet = getOrCreateSheet(SHEET_ADJUSTMENTS, ['Date', 'Type', 'Amount', 'Notes']);
+  adjustmentsSheet.appendRow([date, typeLabels[type], amount, notes]);
+
+  const backUrl = ScriptApp.getService().getUrl() + '?token=' + encodeURIComponent(params.token);
+  const unit = type === 'vacation' ? 'day(s)' : 'hour(s)';
+  return HtmlService.createHtmlOutput(
+    simpleMessage(
+      'Added ' + (amount > 0 ? '+' : '') + amount + ' ' + unit + ' to ' + typeLabels[type] + '.<br><br>' + backLink(backUrl),
+      false
+    )
+  );
+}
+
+function backLink(url) {
+  return (
+    '<a href="' + url + '" style="display:inline-block;padding:10px 18px;background:#A9662A;color:#fff;' +
+    'border-radius:6px;text-decoration:none;font-weight:600">Back to dashboard</a>'
+  );
+}
+
 function simpleMessage(text, isError) {
   return (
     '<!DOCTYPE html><html><head><meta charset="utf-8">' +
@@ -361,17 +422,38 @@ function computeBalances(year) {
     overtimeEarned += Number(row[4]) || 0;
   });
 
+  // Manual corrections: positive adds to that balance's remaining amount,
+  // negative subtracts — e.g. -1 vacation day for time taken before this
+  // system existed, or +3 overtime hours granted directly by an employer.
+  const adjustmentsSheet = ss.getSheetByName(SHEET_ADJUSTMENTS);
+  const adjustments = adjustmentsSheet && adjustmentsSheet.getLastRow() > 1
+    ? adjustmentsSheet.getRange(2, 1, adjustmentsSheet.getLastRow() - 1, 4).getValues()
+    : [];
+
+  let vacationAdjust = 0;
+  let advAdjust = 0;
+  let overtimeAdjust = 0;
+  adjustments.forEach(function (row) {
+    if (String(row[0]).slice(0, 4) !== String(year)) return;
+    const type = row[1];
+    const amount = Number(row[2]) || 0;
+    if (type === 'Vacation') vacationAdjust += amount;
+    if (type === 'ADV') advAdjust += amount;
+    if (type === 'Overtime') overtimeAdjust += amount;
+  });
+
   return {
     year: year,
+    vacationPerYear: vacationPerYear,
     vacationTotal: vacationTotal,
     vacationUsed: vacationUsed,
-    vacationRemaining: round2(vacationTotal - vacationUsed),
+    vacationRemaining: round2(vacationTotal - vacationUsed + vacationAdjust),
     advTotal: advPerYear,
     advUsed: round2(advUsed),
-    advRemaining: round2(advPerYear - advUsed),
+    advRemaining: round2(advPerYear - advUsed + advAdjust),
     overtimeEarned: round2(overtimeEarned),
     overtimeUsed: round2(overtimeUsed),
-    overtimeRemaining: round2(overtimeEarned - overtimeUsed),
+    overtimeRemaining: round2(overtimeEarned - overtimeUsed + overtimeAdjust),
     upcomingHolidays: holidays.filter(function (h) { return h.date >= dateKey(new Date()); }),
   };
 }
@@ -380,9 +462,12 @@ function computeBalances(year) {
 /* Dashboard                                                               */
 /* ---------------------------------------------------------------------- */
 
-function renderDashboard(yearParam) {
-  const year = Number(yearParam) || new Date().getFullYear();
+function renderDashboard(params) {
+  params = params || {};
+  const year = Number(params.year) || new Date().getFullYear();
   const balances = computeBalances(year);
+  const editMode = checkToken(params);
+  const webAppUrl = ScriptApp.getService().getUrl();
 
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_OVERTIME);
   const rows = sheet && sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, 6).getValues() : [];
@@ -430,6 +515,41 @@ function renderDashboard(yearParam) {
         })
         .join('')
     : '<li class="empty">No holidays left this year.</li>';
+
+  const editHtml = editMode
+    ? `
+  <section class="ledger-body">
+    <h2>Edit balances</h2>
+    <form class="edit-form" method="GET" action="${webAppUrl}">
+      <input type="hidden" name="token" value="${esc(params.token)}">
+      <input type="hidden" name="action" value="updateSettings">
+      <div class="edit-row">
+        <label>Vacation days / year<input type="number" name="vacationDaysPerYear" value="${balances.vacationPerYear}" min="0" step="1"></label>
+        <label>ADV hours / year<input type="number" name="advHoursPerYear" value="${balances.advTotal}" min="0" step="0.5"></label>
+        <button type="submit">Save</button>
+      </div>
+    </form>
+
+    <form class="edit-form" method="GET" action="${webAppUrl}">
+      <input type="hidden" name="token" value="${esc(params.token)}">
+      <input type="hidden" name="action" value="addAdjustment">
+      <div class="edit-row">
+        <label>Type
+          <select name="type">
+            <option value="vacation">Vacation (days)</option>
+            <option value="adv">ADV (hours)</option>
+            <option value="overtime">Overtime (hours)</option>
+          </select>
+        </label>
+        <label>Amount<input type="number" name="amount" step="0.25" placeholder="-1 or +2.5" required></label>
+        <label>Date<input type="date" name="date" value="${dateKey(new Date())}"></label>
+        <button type="submit">Add adjustment</button>
+      </div>
+      <label class="notes-label">Notes<input type="text" name="notes" placeholder="e.g. carried over from last year"></label>
+    </form>
+    <p class="hint">Positive adds to the remaining balance, negative subtracts. This link (with your token) is bookmarkable for future edits — the plain dashboard link stays read-only.</p>
+  </section>`
+    : '';
 
   const html = `<!DOCTYPE html>
 <html>
@@ -482,12 +602,26 @@ function renderDashboard(yearParam) {
   ul.holidays li { padding: 6px 0; border-top: 1px solid var(--line); }
   ul.holidays li:first-child { border-top: none; }
   .tag { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--accent); border: 1px solid var(--accent); border-radius: 3px; padding: 1px 5px; margin-left: 4px; }
+  .edit-form { margin-bottom: 16px; }
+  .edit-form:last-of-type { margin-bottom: 0; }
+  .edit-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .edit-row label, .notes-label { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--ink-soft); flex: 1; min-width: 120px; }
+  .notes-label { margin-top: 10px; }
+  .edit-row input, .edit-row select, .notes-label input {
+    font: inherit; font-size: 14px; padding: 7px 9px; border: 1px solid var(--line-strong);
+    border-radius: 5px; background: var(--bg); color: var(--ink);
+  }
+  .edit-row button {
+    font: inherit; font-size: 13.5px; font-weight: 600; padding: 8px 16px; border: none;
+    border-radius: 5px; background: var(--accent); color: #fff; cursor: pointer; flex: none;
+  }
+  .hint { font-size: 11.5px; color: var(--ink-faint); margin: 14px 0 0; }
   footer { text-align: center; font-size: 11.5px; color: var(--ink-faint); margin-top: 16px; }
 </style>
 </head>
 <body>
 <div class="page">
-  <div class="brand"><h1>OverWork</h1><span class="mark">Live Ledger</span></div>
+  <div class="brand"><h1>OverWork</h1><span class="mark">${editMode ? 'Edit Mode' : 'Live Ledger'}</span></div>
   <p class="tagline">Auto-logged from your Shortcuts automations. Balances for ${balances.year}.</p>
 
   <div class="balances">
@@ -507,6 +641,7 @@ function renderDashboard(yearParam) {
       <div class="balance-sub">${balances.overtimeUsed} used / ${balances.overtimeEarned} earned</div>
     </div>
   </div>
+${editHtml}
 
   <div class="ledger-strip">
     <div><span class="stat-value">${totalOvertime.toFixed(1)}</span><span class="stat-label">Total overtime hours</span></div>
